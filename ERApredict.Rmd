@@ -1,0 +1,261 @@
+---
+title: "Predicting ERA with swing data"
+author: "Will Moscato"
+date: '2022-06-29'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(readr)
+library(broom)
+library(ggplot2)
+library(tidymodels) 
+library(vip)
+library(stacks)
+library(DALEX)
+library(DALEXtra)
+library(themis)
+tidymodels_prefer()
+set.seed(494)
+
+theme_set(theme_minimal())
+```
+
+```{r}
+#ERAswing <- read_csv("ERAswing.csv")
+ERAswing <- read_csv("era_swing2.csv")
+ERAswing <- ERAswing %>% 
+  select(-...16)
+```
+
+```{r}
+erasplit <- initial_split(ERAswing, strata = "p_era")
+era_training <- training(erasplit)
+era_testing <- testing(erasplit)
+
+era_training <- era_training %>% 
+  select(-first_name, -last_name, -player_id, -year)
+```
+
+```{r}
+data_cv10 <- vfold_cv(era_training, v = 10)
+
+# Model Specification
+knn_spec <- 
+  nearest_neighbor() %>% # new type of model!
+  set_args(neighbors = tune()) %>% # tuning parameter is neighbor; tuning spec
+  set_engine(engine = 'kknn') %>% # new engine
+  set_mode('regression') 
+
+# Recipe with standardization (!)
+data_rec <- recipe(p_era ~ . , data = era_training) %>%
+    step_nzv(all_predictors()) %>% # removes variables with the same value
+    step_novel(all_nominal_predictors()) %>% # important if you have rare categorical variables 
+    step_normalize(all_numeric_predictors()) %>%  # important standardization step for KNN
+    step_dummy(all_nominal_predictors())  # creates indicator variables for categorical variables (important for KNN!)
+
+# Workflow (Recipe + Model)
+knn_wf <- workflow() %>%
+  add_model(knn_spec) %>% 
+  add_recipe(data_rec)
+
+# Tune model trying a variety of values for neighbors (using 10-fold CV)
+penalty_grid <- grid_regular(
+  neighbors(range = c(1, 50)), #  min and max of values for neighbors
+  levels = 50) # number of neighbors values
+
+knn_fit_cv <- tune_grid(knn_wf, # workflow
+              resamples = data_cv10, #CV folds
+              grid = penalty_grid, # grid specified above
+              metrics = metric_set(rmse, mae))
+```
+
+```{r}
+knn_fit_cv %>% autoplot() # Visualize Trained Model using CV
+
+knn_fit_cv %>% show_best(metric = 'mae') # Show evaluation metrics for different values of neighbors, ordered
+
+# Choose value of Tuning Parameter (neighbors)
+tuned_knn_wf <- knn_fit_cv %>% 
+  select_by_one_std_err(metric = 'mae',desc(neighbors)) %>%  # Choose neighbors value that leads to the highest neighbors within 1 se of the lowest CV MAE
+  finalize_workflow(knn_wf, .)
+
+# Fit final KNN model to data
+knn_fit_final <- tuned_knn_wf %>%
+  fit(data = era_training) 
+
+# Use the best model to make predictions
+# new_data should be a data.frame with required predictors
+pred <- predict(knn_fit_final, new_data = era_testing)
+
+era_testing2 <- cbind(era_testing, pred)
+era_testing2 <- era_testing2 %>% 
+  select(last_name, first_name, p_era, .pred)
+```
+
+```{r}
+lm_lasso_spec <- 
+  linear_reg() %>%
+  set_args(mixture = 1, penalty = 0) %>% ## mixture = 1 indicates Lasso, we'll choose penalty later
+  set_engine(engine = 'glmnet') %>% #note we are using a different engine
+  set_mode('regression') 
+
+# Recipe with standardization (!)
+data_rec <- recipe( p_era ~ ., data = era_training) %>%
+    step_nzv(all_predictors()) %>% # removes variables with the same value
+    step_novel(all_nominal_predictors()) %>% # important if you have rare categorical variables 
+    step_normalize(all_numeric_predictors()) %>%  # important standardization step for LASSO
+    step_dummy(all_nominal_predictors())  # creates indicator variables for categorical variables
+
+# Workflow (Recipe + Model)
+lasso_wf <- workflow() %>% 
+  add_recipe(data_rec) %>%
+  add_model(lm_lasso_spec)
+
+# Fit Model
+lasso_fit <- lasso_wf %>% 
+  fit(data = era_training) # Fit to data
+```
+
+```{r}
+plot(lasso_fit %>% extract_fit_parsnip() %>% pluck('fit'), # way to get the original glmnet output
+     xvar = "lambda")
+```
+
+```{r}
+# Create CV folds
+data_cv10 <- vfold_cv(era_training, v = 10)
+
+# Lasso Model Spec with tune
+lm_lasso_spec_tune <- 
+  linear_reg() %>%
+  set_args(mixture = 1, penalty = tune()) %>% ## mixture = 1 indicates Lasso
+  set_engine(engine = 'glmnet') %>% #note we are using a different engine
+  set_mode('regression') 
+
+# Workflow (Recipe + Model)
+lasso_wf_tune <- workflow() %>% 
+  add_recipe(data_rec) %>%
+  add_model(lm_lasso_spec_tune) 
+
+# Tune Model (trying a variety of values of Lambda penalty)
+penalty_grid <- grid_regular(
+  penalty(range = c(-5, 3)), #log10 transformed 10^-5 to 10^3
+  levels = 30)
+
+tune_res <- tune_grid( # new function for tuning parameters
+  lasso_wf_tune, # workflow
+  resamples = data_cv10, # cv folds
+  metrics = metric_set(rmse, mae),
+  grid = penalty_grid # penalty grid defined above
+)
+
+# Visualize Model Evaluation Metrics from Tuning
+autoplot(tune_res) + theme_classic()
+
+# Summarize Model Evaluation Metrics (CV)
+collect_metrics(tune_res) %>%
+  filter(.metric == 'rmse') %>% # or choose mae
+  select(penalty, rmse = mean) 
+
+best_penalty <- select_best(tune_res, metric = 'rmse') # choose penalty value based on lowest mae or rmse
+
+# Fit Final Model
+final_wf <- finalize_workflow(lasso_wf_tune, best_penalty) # incorporates penalty value to workflow
+
+final_fit <- fit(final_wf, data = era_training)
+
+tidy(final_fit)
+
+
+pred2 <- predict(final_fit, new_data = era_testing)
+
+era_testing_lasso <- cbind(era_testing, pred2)
+era_testing_lasso <- era_testing_lasso %>% 
+  select(last_name, first_name, p_era, .pred)
+```
+
+```{r}
+lasso_fit <- last_fit(final_fit, erasplit)
+collect_metrics(lasso_fit)
+```
+
+
+```{r}
+era_lasso_explain <- 
+  explain_tidymodels(
+    model = final_fit,
+    data = era_testing %>% select(-p_era), 
+    y = as.numeric(era_training$p_era),
+    label = "lasso"
+  )
+```
+
+```{r}
+era_var_imp <- 
+  model_parts(
+    era_lasso_explain
+    )
+
+plot(era_var_imp)
+```
+
+```{r}
+new_obs_1 <- era_testing %>% filter(last_name == "deGrom" & year == 2015)
+
+#Pulls together the data needed for the break-down plot
+deGrom <- predict_parts(explainer = era_lasso_explain,
+                          new_observation = new_obs_1,
+                          type = "break_down") #default
+deGrom_pp <- plot(deGrom, title = "Jacob deGrom Prediction") + theme(plot.title = element_text(hjust = .5, size = 15, color = "black", face = "bold"))
+
+deGrom_pp
+```
+
+```{r}
+new_obs_2 <- era_testing %>% filter(last_name == "Cole" & year == 2019)
+
+#Pulls together the data needed for the break-down plot
+Cole <- predict_parts(explainer = era_lasso_explain,
+                          new_observation = new_obs_2,
+                          type = "break_down") #default
+Cole_pp <- plot(Cole, title = "Gerrit Cole Prediction") + theme(plot.title = element_text(hjust = .5, size = 15, color = "black", face = "bold"))
+
+Cole_pp
+```
+
+```{r}
+new_obs <- ERAswing %>% filter(last_name == "Verlander" & year == 2016)
+
+#Pulls together the data needed for the break-down plot
+Shiny <- predict_parts(explainer = era_lasso_explain,
+                          new_observation = new_obs,
+                          type = "break_down") #default
+Shiny_pp <- plot(Shiny, title = "Shiny Test") + theme(plot.title = element_text(hjust = .5, size = 15, color = "black", face = "bold"))
+
+Shiny_pp
+```
+```{r}
+predict_test <- data.frame(60.8, 32.3, 22.2, 33.3, 44.4, 55.5, 66.6, 77.7, 88.8, 99.9)
+names(predict_test) <- c("z_swing_percent", "z_swing_miss_percent", "oz_swing_percent", "oz_swing_miss_percent", "meatball_swing_percent", "meatball_percent", "iz_contact_percent", "in_zone_percent", "edge_percent", "swing_percent")
+
+test <- predict_parts(explainer = era_lasso_explain,
+                          new_observation = predict_test,
+                          type = "break_down") #default
+test_pp <- plot(test, title = "Test") + theme(plot.title = element_text(hjust = .5, size = 15, color = "black", face = "bold"))
+
+test_pp
+```
+
+```{r}
+lasso_model <- saveRDS(final_fit, file = "eralasso.rds")
+```
+
+
+
