@@ -41,7 +41,10 @@ era_lasso_explain <-
 
 # Define UI for application that draws a histogram
 ui <- fluidPage(
-  theme = bs_theme(),
+  theme = bs_theme(bootswatch = "simplex",
+                   bg = "aliceblue",
+                   fg = "black",
+                   primary = "blue"),
   titlePanel("ERA Prediction Based on Swing and Pitch Location Data"),
 
   sidebarLayout(
@@ -93,7 +96,7 @@ ui <- fluidPage(
                 value = 75,
                 step = 0.1),
     sliderInput(inputId = "in_zone_percent", 
-                label = "In ZonePercentage",
+                label = "In Zone Percentage",
                 min = 25, 
                 max = 75, 
                 value = 50,
@@ -127,10 +130,10 @@ server <- function(input, output) {
       test <- predict_parts(explainer = era_lasso_explain,
                             new_observation = predict_test,
                             type = "break_down") #default
-      test_pp <- plot(test, title = "Predicted ERA") + theme(plot.title = element_text(hjust = .5, size = 15, color = "black", face = "bold"))
+      test_pp <- plot(test, title = "Predicted ERA") + theme(plot.title = element_text(hjust = .5, size = 50, color = "black", face = "bold"))
       
-      test_pp
-    })
+      test_pp 
+    },height = 1000, width = 800)
 }
 
 # Run the application 

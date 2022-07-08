@@ -5,10 +5,10 @@ account: wmoscato
 server: shinyapps.io
 hostUrl: https://api.shinyapps.io/v1
 appId: 6610531
-bundleId: 6081024
+bundleId: 6081109
 url: https://wmoscato.shinyapps.io/ERAprediction/
-when: 1657267653.82602
-lastSyncTime: 1657267653.82606
+when: 1657270114.8928
+lastSyncTime: 1657270114.89285
 asMultiple: FALSE
 asStatic: FALSE
 ignoredFiles: era_swing2.csv
