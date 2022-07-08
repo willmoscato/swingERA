@@ -255,6 +255,7 @@ test_pp
 
 ```{r}
 lasso_model <- saveRDS(final_fit, file = "eralasso.rds")
+eradata <- saveRDS(ERAswing, file = "eradata.rds")
 ```
 
 
